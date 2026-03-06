@@ -1,6 +1,6 @@
 services:
   server:
-    image: ghcr.io/ZhongFuze/solana-name-indexer:main
+    image: ghcr.io/zhongfuze/solana-name-indexer:main
     container_name: solana-name-indexer
     network_mode: "host"
     volumes:

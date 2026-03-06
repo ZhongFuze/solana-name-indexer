@@ -163,13 +163,6 @@ async function fetchDomainsAndUpsert() {
                 AND id > $1
                 ORDER BY id ASC 
                 LIMIT $2`;
-            // const query = `
-            //     SELECT id, namenode 
-            //     FROM solana_name_indexer 
-            //     WHERE owner = '4JBz4tAKgAmxjDPHHi9HRLj14RsCQJyuCkCFKnpz7B9s' 
-            //     AND id > $1
-            //     ORDER BY id ASC 
-            //     LIMIT $2`;
 
             const batch = await db.any(query, [lastId, batchSize]);
 
@@ -381,10 +374,11 @@ const getDomainInfo = limiter.wrap(async (domain_pubkey) => {
 
 
 const run = async () => {
-    await fetchAllDomains();
-    await readDomainsAndUpsert();
+    // await fetchAllDomains();
+    // await readDomainsAndUpsert();
+    await fetchDomainsAndUpsert();
     // const pubkey = new PublicKey("6o79HpB1JekRD327UwLYJ4uoExm5k4LdTSGQiGwxZki6");
-    // const pubkey = new PublicKey("C5Yp5Sj7kWDHM3e17MQ1Pj9UBvaXeMcayKJGyBagqMoT");
+    // const pubkey = new PublicKey("11LNLDoppF2PZzTfFieSob4PfRMBxauxbZxccB4US5d");
     // const result = await retryGetDomainInfo(pubkey);
     // console.log(result);
 }

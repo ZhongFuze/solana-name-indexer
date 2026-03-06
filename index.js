@@ -43,12 +43,20 @@ const db = pg({
 const SOLANA_MAIN_CLIENT = new Connection(process.env.ALCHEMY_RPC);
 
 
-const limiter = new Bottleneck({
-    minTime: 0, // means Bottleneck will not add any fixed delay between jobs
-    maxConcurrent: 20, // means at most 20 jobs can run at the same time.
-    reservoir: 50, // means you start with 50 available executions
-    reservoirRefreshAmount: 50, // mean the bucket refills to 50 every 1 second
-    reservoirRefreshInterval: 1000 // ...every 1 second
+// const limiter = new Bottleneck({
+//     minTime: 0, // means Bottleneck will not add any fixed delay between jobs
+//     maxConcurrent: 20, // means at most 20 jobs can run at the same time.
+//     reservoir: 50, // means you start with 50 available executions
+//     reservoirRefreshAmount: 50, // mean the bucket refills to 50 every 1 second
+//     reservoirRefreshInterval: 1000 // ...every 1 second
+// });
+
+const rpcLimiter = new Bottleneck({
+    minTime: 250, // add spacing between individual RPC requests
+    maxConcurrent: 1, // keep only one Solana RPC request in flight
+    reservoir: 4, // allow a small burst
+    reservoirRefreshAmount: 4, // refill a small burst
+    reservoirRefreshInterval: 1000 // every 1 second
 });
 
 const SOL_TLD = new PublicKey("58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx"); // .sol TLD
@@ -244,10 +252,11 @@ async function retryGetDomainInfo(domain_pubkey, retries = 3) {
             return await getDomainInfo(domain_pubkey);
         } catch (error) {
             console.error(`Attempt ${attempt + 1} failed for ${domain_pubkey}:`, error);
+            const message = error?.message || '';
+            const isRateLimited = message.includes('429') || message.includes('Too Many Requests');
+            const delayMs = isRateLimited ? (attempt + 1) * 5000 : 3000;
+            await new Promise(resolve => setTimeout(resolve, delayMs));
         }
-
-        // Wait for 3 seconds before retrying
-        await new Promise(resolve => setTimeout(resolve, 3000));
     }
 
     // If all retries fail, return the fallback solanaZeroAddress info
@@ -276,10 +285,10 @@ async function getRegistrationTime(nameAccount, connection = SOLANA_MAIN_CLIENT)
         let oldestSignatureInfo = null;
 
         while (true) {
-            const signatures = await connection.getSignaturesForAddress(pubkey, {
+            const signatures = await rpcLimiter.schedule(() => connection.getSignaturesForAddress(pubkey, {
                 before,
                 limit: 1000,
-            });
+            }));
 
             if (signatures.length === 0) {
                 break;
@@ -304,9 +313,9 @@ async function getRegistrationTime(nameAccount, connection = SOLANA_MAIN_CLIENT)
             };
         }
 
-        const tx = await connection.getTransaction(oldestSignatureInfo.signature, {
+        const tx = await rpcLimiter.schedule(() => connection.getTransaction(oldestSignatureInfo.signature, {
             maxSupportedTransactionVersion: 0,
-        });
+        }));
         const blockTime = tx?.blockTime ?? oldestSignatureInfo.blockTime ?? null;
 
         return {
@@ -329,10 +338,12 @@ async function getRegistrationTime(nameAccount, connection = SOLANA_MAIN_CLIENT)
 }
 
 
-const getDomainInfo = limiter.wrap(async (domain_pubkey) => {
+const getDomainInfo = async (domain_pubkey) => {
     try {
         const pubkey = new PublicKey(domain_pubkey);
-        const { registry, nftOwner } = await NameRegistryState.retrieve(SOLANA_MAIN_CLIENT, pubkey);
+        const { registry, nftOwner } = await rpcLimiter.schedule(() =>
+            NameRegistryState.retrieve(SOLANA_MAIN_CLIENT, pubkey)
+        );
         let contenthash = registry.data.toString('utf-8').trim();
         contenthash = contenthash.replace(/\x00+$/, '');
 
@@ -370,7 +381,7 @@ const getDomainInfo = limiter.wrap(async (domain_pubkey) => {
         console.error(`Error fetching domain info for ${domain_pubkey}:`, error);
         throw error;
     }
-});
+};
 
 
 const run = async () => {

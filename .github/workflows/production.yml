@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-image:
-    if: github.ref_name == 'main' && github.repository == 'zhongfuze/solana-name-indexer'
+    if: github.ref_name == 'main' && github.repository == 'ZhongFuze/solana-name-indexer'
     runs-on: ubuntu-latest
     env:
       REGISTRY: ghcr.io

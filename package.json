@@ -1,0 +1,30 @@
+{
+    "name": "solana-name-indexer",
+    "version": "1.0.0",
+    "main": "index.js",
+    "type": "module",
+    "scripts": {
+        "start": "node --no-deprecation index.js"
+    },
+    "keywords": [],
+    "author": "ZhongFuze <zhongsigen@outlook.com>",
+    "license": "ISC",
+    "description": "",
+    "dependencies": {
+        "@bonfida/spl-name-service": "^3.0.19",
+        "@onsol/tldparser": "^1.0.8",
+        "@solana/spl-token": "0.4.14",
+        "bottleneck": "2.19.5",
+        "dayjs": "1.11.13",
+        "dotenv": "16.4.5",
+        "express": "4.22.1",
+        "pg": "8.13.0",
+        "pg-promise": "11.10.1"
+    },
+    "overrides": {
+        "@solana/spl-token": "0.4.14",
+        "@bonfida/spl-name-service": {
+            "@solana/spl-token": "0.4.14"
+        }
+    }
+}

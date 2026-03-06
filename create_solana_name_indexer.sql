@@ -23,3 +23,10 @@ CREATE TABLE solana_name_indexer (
     texts_v2 JSONB default '{}'::jsonb,
     CONSTRAINT unique_solana_name_indexer UNIQUE (namenode)
 );
+
+
+CREATE INDEX solana_name_indexer_name_index ON solana_name_indexer (name);
+CREATE INDEX solana_name_indexer_label_name_index ON solana_name_indexer (label_name);
+CREATE INDEX solana_name_indexer_owner_index ON solana_name_indexer (owner);
+CREATE INDEX solana_name_indexer_resolved_index ON solana_name_indexer (resolved_address);
+CREATE INDEX solana_name_indexer_reverse_index ON solana_name_indexer (reverse_address);

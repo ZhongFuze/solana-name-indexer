@@ -381,11 +381,12 @@ const getDomainInfo = limiter.wrap(async (domain_pubkey) => {
 
 
 const run = async () => {
-    // await fetchAllDomains();
+    await fetchAllDomains();
+    await readDomainsAndUpsert();
     // const pubkey = new PublicKey("6o79HpB1JekRD327UwLYJ4uoExm5k4LdTSGQiGwxZki6");
-    const pubkey = new PublicKey("C5Yp5Sj7kWDHM3e17MQ1Pj9UBvaXeMcayKJGyBagqMoT");
-    const result = await retryGetDomainInfo(pubkey);
-    console.log(result);
+    // const pubkey = new PublicKey("C5Yp5Sj7kWDHM3e17MQ1Pj9UBvaXeMcayKJGyBagqMoT");
+    // const result = await retryGetDomainInfo(pubkey);
+    // console.log(result);
 }
 
 // Execute the run function

@@ -52,10 +52,10 @@ const SOLANA_MAIN_CLIENT = new Connection(process.env.ALCHEMY_RPC);
 // });
 
 const rpcLimiter = new Bottleneck({
-    minTime: 50, // 20 requests per second
+    minTime: 100, // 10 requests per second
     maxConcurrent: 1, // keep only one Solana RPC request in flight
-    reservoir: 20, // allow up to 20 requests each second
-    reservoirRefreshAmount: 20, // refill to 20 requests
+    reservoir: 10, // allow up to 10 requests each second
+    reservoirRefreshAmount: 10, // refill to 10 requests
     reservoirRefreshInterval: 1000 // every 1 second
 });
 

@@ -414,6 +414,67 @@ async function fetchPrimaryDomainsAndUpdate() {
 }
 
 
+async function fetchDomainTextsV2AndUpdate() {
+    try {
+        console.log("Connected to PostgreSQL");
+
+        const batchSize = 100;
+        let allCount = 0;
+        let batchCount = 0;
+        let offset = 0;
+        let hasMoreRows = true;
+
+        while (hasMoreRows) {
+            // Fetch 100 distinct owners from the database
+            const query = `
+                SELECT name
+                FROM solana_name_indexer 
+                WHERE name IS NOT NULL AND owner != '11111111111111111111111111111111'
+                LIMIT $1 OFFSET $2`;
+
+            const batch = await db.any(query, [batchSize, offset]);
+            let hasTextsCount = 0;
+            if (batch.length > 0) {
+                for (const row of batch) {
+                    const name = row.name;
+                    const domainName = name.endsWith('.sol') ? name.slice(0, -4) : name;
+                    const domain_texts = await retryGetTextsV2(domainName);
+                    if (Object.keys(domain_texts).length > 0) {
+                        hasTextsCount += 1;
+                        allCount++;
+                        const texts_json = JSON.stringify(domain_texts);
+                        console.log(`domain ${domainName} GetTextsV2 texts:`, texts_json);
+                        await db.none(
+                            `UPDATE solana_name_indexer 
+                             SET texts_v2 = $1
+                             WHERE name = $2`,
+                            [texts_json, name]
+                        );
+                    } else {
+                        console.log(`domain ${domainName} has no texts`);
+                    }
+                }
+
+                // Update last processed ID to keep track of pagination
+                offset += batchSize;
+                batchCount++;
+                console.log(`offset ${offset}`)
+                console.log(`Batch(${batchCount}) ${batch.length}rows has ${hasTextsCount} upserted.`);
+            }
+
+            // Stop the loop if there are no more rows to fetch
+            if (batch.length < batchSize) {
+                hasMoreRows = false;
+            }
+        }
+        console.log(`All batches completed. Total upserted records: ${allCount}`);
+    } catch (error) {
+        console.error('Error:', error);
+    } finally {
+        console.log("Disconnected from PostgreSQL");
+    }
+}
+
 async function retryGetDomainInfo(domain_pubkey, retries = 3) {
     for (let attempt = 0; attempt < retries; attempt++) {
         try {
@@ -648,12 +709,101 @@ const getPrimaryDomains = async (wallets) => {
 };
 
 
+async function retryGetTextsV2(domainName, retries = 3) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+        try {
+            return await getTextsV2(domainName);  // Attempt to fetch texts
+        } catch (error) {
+            console.error(`Attempt ${attempt + 1} failed for getTextsV2 ${domainName}:`, error);
+        }
+
+        // Wait for 3 seconds before retrying
+        await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+
+    // If all retries fail, return an empty object or handle differently
+    return {};  // Return empty object as a fallback
+}
+
+const getTextsV2 = limiter.wrap(async (domainName) => {
+    // const record_keys = [
+    //     Record.IPNS,
+    //     Record.IPFS,
+    //     Record.ARWV,
+    //     Record.SOL,
+    //     Record.BTC,
+    //     Record.LTC,
+    //     Record.DOGE,
+    //     Record.BSC,
+    //     Record.Email,
+    //     Record.Url,
+    //     Record.Discord,
+    //     Record.Reddit,
+    //     Record.Twitter,
+    //     Record.Telegram,
+    //     Record.Pic,
+    //     Record.SHDW,
+    //     Record.POINT,
+    //     Record.Injective,
+    //     Record.Backpack
+    // ];
+    const record_keys = [
+        // Record.IPNS,
+        // Record.IPFS,
+        // Record.ARWV,
+        Record.SOL,
+        // Record.BTC,
+        // Record.LTC,
+        // Record.DOGE,
+        // Record.BSC,
+        Record.Email,
+        Record.Url,
+        Record.Discord,
+        // Record.Reddit,
+        Record.Twitter,
+        Record.Telegram,
+        Record.Pic,
+        // Record.SHDW,
+        // Record.POINT,
+        // Record.Injective,
+        // Record.Backpack
+    ];
+
+    try {
+        const texts = {}; // json object
+        for (const record of record_keys) {
+            try {
+                const { deserializedContent } = await getRecordV2(SOLANA_MAIN_CLIENT, domainName, record, { deserialize: true });
+                if (deserializedContent) {
+                    // const value = retrievedRecord.getContent().toString();
+                    texts[record.toLowerCase()] = deserializedContent;
+                    // if (isValidUTF8(value)) {
+                    //     texts[record.toLowerCase()] = value;
+                    // } else {
+                    //     console.warn(`Invalid UTF-8 detected in record ${record} for domain ${domainName}. Skipping.`);
+                    // }
+                }
+            } catch (error) {
+                // console.error(`Error retrieving record ${record} for domain ${domainName}:`, error);
+                continue;
+            }
+        }
+        console.log(`domain ${domainName} getRecordV2 texts:`, texts);
+        return texts;
+    } catch (error) {
+        console.error(`Error fetching texts getRecordV2 error:`, error);
+        throw error
+    }
+});
+
+
 const run = async () => {
     // await fetchAllDomains();
     // await readDomainsAndUpsert();
     // await fetchDomainsAndUpsert();
     // await fetchDomainsByOwnersAndUpsert();
-    await fetchPrimaryDomainsAndUpdate();
+    // await fetchPrimaryDomainsAndUpdate();
+    await fetchDomainTextsV2AndUpdate();
     // const pubkey = new PublicKey("6o79HpB1JekRD327UwLYJ4uoExm5k4LdTSGQiGwxZki6");
     // const pubkey = new PublicKey("GaSXoiQULHTanhP8EQmZR3ZwaDLzRs3xWxBMSLcX2kPT");
     // const result = await retryGetDomainInfo(pubkey);

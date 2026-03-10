@@ -725,7 +725,7 @@ async function retryGetTextsV2(domainName, retries = 3) {
     return {};  // Return empty object as a fallback
 }
 
-const getTextsV2 = limiter.wrap(async (domainName) => {
+const getTextsV2 = async (domainName) => {
     // const record_keys = [
     //     Record.IPNS,
     //     Record.IPFS,
@@ -773,7 +773,9 @@ const getTextsV2 = limiter.wrap(async (domainName) => {
         const texts = {}; // json object
         for (const record of record_keys) {
             try {
-                const { deserializedContent } = await getRecordV2(SOLANA_MAIN_CLIENT, domainName, record, { deserialize: true });
+                const { deserializedContent } = await rpcLimiter.schedule(() =>
+                    getRecordV2(SOLANA_MAIN_CLIENT, domainName, record, { deserialize: true })
+                );
                 if (deserializedContent) {
                     // const value = retrievedRecord.getContent().toString();
                     texts[record.toLowerCase()] = deserializedContent;
@@ -794,7 +796,7 @@ const getTextsV2 = limiter.wrap(async (domainName) => {
         console.error(`Error fetching texts getRecordV2 error:`, error);
         throw error
     }
-});
+};
 
 
 const run = async () => {

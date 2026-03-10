@@ -652,7 +652,8 @@ const run = async () => {
     // await fetchAllDomains();
     // await readDomainsAndUpsert();
     // await fetchDomainsAndUpsert();
-    await fetchDomainsByOwnersAndUpsert();
+    // await fetchDomainsByOwnersAndUpsert();
+    await fetchPrimaryDomainsAndUpdate();
     // const pubkey = new PublicKey("6o79HpB1JekRD327UwLYJ4uoExm5k4LdTSGQiGwxZki6");
     // const pubkey = new PublicKey("GaSXoiQULHTanhP8EQmZR3ZwaDLzRs3xWxBMSLcX2kPT");
     // const result = await retryGetDomainInfo(pubkey);

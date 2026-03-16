@@ -4,7 +4,9 @@
     "main": "index.js",
     "type": "module",
     "scripts": {
-        "start": "node --no-deprecation index.js"
+        "start": "node --no-deprecation src/index.js",
+        "start:watcher3": "node src/watcher3.js",
+        "check:watcher3": "node --check src/watcher3.js"
     },
     "keywords": [],
     "author": "ZhongFuze <zhongsigen@outlook.com>",

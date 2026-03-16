@@ -7,6 +7,7 @@ import fs from 'fs';
 import readline from 'readline';
 import Bottleneck from 'bottleneck';
 import dayjs from 'dayjs';
+import { log } from 'console';
 
 const require = createRequire(import.meta.url);
 const {
@@ -43,21 +44,21 @@ const db = pg({
 const SOLANA_MAIN_CLIENT = new Connection(process.env.ALCHEMY_RPC);
 
 
-// const limiter = new Bottleneck({
-//     minTime: 0, // means Bottleneck will not add any fixed delay between jobs
-//     maxConcurrent: 20, // means at most 20 jobs can run at the same time.
-//     reservoir: 50, // means you start with 50 available executions
-//     reservoirRefreshAmount: 50, // mean the bucket refills to 50 every 1 second
-//     reservoirRefreshInterval: 1000 // ...every 1 second
-// });
-
 const rpcLimiter = new Bottleneck({
-    minTime: 100, // 10 requests per second
-    maxConcurrent: 1, // keep only one Solana RPC request in flight
-    reservoir: 10, // allow up to 10 requests each second
-    reservoirRefreshAmount: 10, // refill to 10 requests
-    reservoirRefreshInterval: 1000 // every 1 second
+    minTime: 0, // means Bottleneck will not add any fixed delay between jobs
+    maxConcurrent: 20, // means at most 20 jobs can run at the same time.
+    reservoir: 50, // means you start with 50 available executions
+    reservoirRefreshAmount: 50, // mean the bucket refills to 50 every 1 second
+    reservoirRefreshInterval: 1000 // ...every 1 second
 });
+
+// const rpcLimiter = new Bottleneck({
+//     minTime: 100, // 10 requests per second
+//     maxConcurrent: 1, // keep only one Solana RPC request in flight
+//     reservoir: 10, // allow up to 10 requests each second
+//     reservoirRefreshAmount: 10, // refill to 10 requests
+//     reservoirRefreshInterval: 1000 // every 1 second
+// });
 
 const SOL_TLD = new PublicKey("58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx"); // .sol TLD
 const NAME_PROGRAM_ID = new PublicKey("namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX");
@@ -679,6 +680,14 @@ async function retryGetPrimaryDomains(wallets, retries = 3) {
     return [];
 }
 
+function chunkArray(items, chunkSize) {
+    const chunks = [];
+    for (let i = 0; i < items.length; i += chunkSize) {
+        chunks.push(items.slice(i, i + chunkSize));
+    }
+    return chunks;
+}
+
 const getPrimaryDomains = async (wallets) => {
     try {
         const primaryDomains = await rpcLimiter.schedule(() =>
@@ -798,6 +807,203 @@ const getTextsV2 = async (domainName) => {
     }
 };
 
+async function fetchNamenodesFromFileAndUpsert(filePath) {
+    const content = await fs.promises.readFile(filePath, 'utf8');
+    const nameAccountEntryMap = new Map();
+    for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+        const parts = line.split('\t');
+        if (parts.length < 3 || !parts[2]) {
+            continue;
+        }
+        const instruction = parts[1]?.trim() ?? null;
+        const nameAccount = parts[2].trim();
+        const existing = nameAccountEntryMap.get(nameAccount);
+        nameAccountEntryMap.set(nameAccount, {
+            name_account: nameAccount,
+            instructions: new Set([
+                ...(existing?.instructions ?? []),
+                instruction,
+            ].filter(Boolean)),
+            instruction,
+        });
+    }
+    const nameAccountEntries = [...nameAccountEntryMap.values()].map((entry) => ({
+        ...entry,
+        instruction: entry.instructions.has('NameRegistryCreate') ? 'NameRegistryCreate' : entry.instruction,
+    }));
+
+    console.log(`Found ${nameAccountEntries.length} unique name_account entries in ${filePath}`);
+    const candidateNamenodeMap = new Map();
+    for (const entry of nameAccountEntries) {
+        const nameAccount = entry.name_account;
+        if (nameAccount === solanaZeroAddress) {
+            continue;
+        }
+
+        const seedDomainInfo = await retryGetDomainInfo(nameAccount);
+        console.log('inputSeedDomainInfo:', seedDomainInfo);
+
+        if (!seedDomainInfo || !seedDomainInfo.namenode) {
+            continue;
+        }
+
+        if (seedDomainInfo.parent_node !== SOL_TLD.toBase58()) {
+            continue;
+        }
+
+        const existing = candidateNamenodeMap.get(seedDomainInfo.namenode);
+        candidateNamenodeMap.set(seedDomainInfo.namenode, {
+            seedDomainInfo,
+            instructions: new Set([
+                ...(existing?.instructions ?? []),
+                entry.instruction,
+            ].filter(Boolean)),
+        });
+    }
+    console.log(`Resolved ${candidateNamenodeMap.size} unique candidate namenodes`);
+
+    const upsertQuery = `
+        INSERT INTO solana_name_indexer (
+            namenode,
+            name,
+            label_name,
+            parent_node,
+            registration_time,
+            registration_hash,
+            registration_height,
+            expire_time,
+            nft_owner,
+            is_tokenized,
+            is_primary,
+            reverse_address,
+            owner,
+            resolver,
+            resolved_address,
+            contenthash,
+            texts_v2,
+            update_time
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14, $15, $16, $17, $18
+        )
+        ON CONFLICT (namenode) DO UPDATE
+        SET label_name = EXCLUDED.label_name,
+            parent_node = EXCLUDED.parent_node,
+            registration_time = EXCLUDED.registration_time,
+            registration_hash = EXCLUDED.registration_hash,
+            registration_height = EXCLUDED.registration_height,
+            expire_time = EXCLUDED.expire_time,
+            nft_owner = EXCLUDED.nft_owner,
+            is_tokenized = EXCLUDED.is_tokenized,
+            is_primary = EXCLUDED.is_primary,
+            reverse_address = EXCLUDED.reverse_address,
+            owner = EXCLUDED.owner,
+            resolver = EXCLUDED.resolver,
+            resolved_address = EXCLUDED.resolved_address,
+            contenthash = EXCLUDED.contenthash,
+            texts_v2 = EXCLUDED.texts_v2,
+            update_time = EXCLUDED.update_time;
+    `;
+
+    const candidateNamenodes = [...candidateNamenodeMap.keys()];
+    const existingRows = candidateNamenodes.length
+        ? await db.any(
+            `SELECT namenode, name, label_name
+             FROM solana_name_indexer
+             WHERE namenode IN ($1:csv)`,
+            [candidateNamenodes]
+        )
+        : [];
+    const existingRowMap = new Map(existingRows.map((row) => [row.namenode, row]));
+
+    const allCandidateOwners = new Set();
+    for (const [, candidate] of candidateNamenodeMap.entries()) {
+        const { seedDomainInfo } = candidate;
+        if (seedDomainInfo.owner && seedDomainInfo.owner !== solanaZeroAddress) {
+            allCandidateOwners.add(seedDomainInfo.owner);
+        }
+    }
+
+    const primaryOwnerWallets = [...allCandidateOwners].map((owner) => new PublicKey(owner));
+    const primaryWalletChunks = chunkArray(primaryOwnerWallets, 100);
+    const allPrimaryDomains = [];
+    for (const walletChunk of primaryWalletChunks) {
+        const chunkResult = await retryGetPrimaryDomains(walletChunk);
+        allPrimaryDomains.push(...chunkResult);
+    }
+    const primaryDomainsByOwner = new Map();
+    for (const item of allPrimaryDomains) {
+        if (!primaryDomainsByOwner.has(item.reverse_address)) {
+            primaryDomainsByOwner.set(item.reverse_address, []);
+        }
+        primaryDomainsByOwner.get(item.reverse_address).push(item);
+    }
+
+    const results = [];
+    for (const [namenode, candidate] of candidateNamenodeMap.entries()) {
+        const { seedDomainInfo } = candidate;
+        console.log(`Processing candidate namenode ${namenode}`);
+        const primaryDomains = primaryDomainsByOwner.get(seedDomainInfo.owner) ?? [];
+        const primaryMatch = primaryDomains.find((item) => item.namenode === namenode);
+        const existingRow = existingRowMap.get(namenode) ?? null;
+        const resolvedName = existingRow?.name ?? primaryMatch?.name ?? null;
+        const resolvedLabelName = existingRow?.label_name ?? primaryMatch?.label_name ?? null;
+        const domainName = resolvedLabelName || (resolvedName?.endsWith('.sol') ? resolvedName.slice(0, -4) : resolvedName);
+        const domainTexts = domainName ? await retryGetTextsV2(domainName) : {};
+        const formattedNow = dayjs().format('YYYY-MM-DD HH:mm:ss');
+        const mergedRow = {
+            namenode: seedDomainInfo.namenode,
+            name: resolvedName,
+            label_name: resolvedLabelName,
+            parent_node: seedDomainInfo.parent_node ?? SOL_TLD.toBase58(),
+            registration_time: seedDomainInfo.registration_time ?? null,
+            registration_hash: seedDomainInfo.registration_hash ?? null,
+            registration_height: seedDomainInfo.registration_height ?? null,
+            expire_time: seedDomainInfo.expire_time ?? null,
+            nft_owner: seedDomainInfo.nft_owner ?? null,
+            is_tokenized: seedDomainInfo.is_tokenized ?? false,
+            is_primary: Boolean(primaryMatch),
+            reverse_address: primaryMatch?.reverse_address ?? null,
+            owner: seedDomainInfo.owner,
+            resolver: seedDomainInfo.resolver ?? NAME_PROGRAM_ID.toBase58(),
+            resolved_address: seedDomainInfo.resolved_address ?? seedDomainInfo.owner,
+            contenthash: seedDomainInfo.contenthash ?? null,
+            texts_v2: Object.keys(domainTexts).length ? JSON.stringify(domainTexts) : null,
+            update_time: formattedNow,
+        };
+
+        await db.none(upsertQuery, [
+            mergedRow.namenode,
+            mergedRow.name,
+            mergedRow.label_name,
+            mergedRow.parent_node,
+            mergedRow.registration_time,
+            mergedRow.registration_hash,
+            mergedRow.registration_height,
+            mergedRow.expire_time,
+            mergedRow.nft_owner,
+            mergedRow.is_tokenized,
+            mergedRow.is_primary,
+            mergedRow.reverse_address,
+            mergedRow.owner,
+            mergedRow.resolver,
+            mergedRow.resolved_address,
+            mergedRow.contenthash,
+            mergedRow.texts_v2,
+            mergedRow.update_time,
+        ]);
+
+        results.push({
+            name_account: namenode,
+            upserted_count: 1,
+        });
+        console.log(`Upserted namenode ${mergedRow.namenode} (${mergedRow.name ?? 'unknown'})`);
+    }
+
+    return results;
+}
+
 
 const run = async () => {
     // await fetchAllDomains();
@@ -805,10 +1011,27 @@ const run = async () => {
     // await fetchDomainsAndUpsert();
     // await fetchDomainsByOwnersAndUpsert();
     // await fetchPrimaryDomainsAndUpdate();
-    await fetchDomainTextsV2AndUpdate();
+    // await fetchDomainTextsV2AndUpdate();
+    // await fetch_namenode_and_upsert("6fVAvhDPbKx8GYxRUjFUjaWhSKQj25ZkN5xEUK98NtYh");
     // const pubkey = new PublicKey("6o79HpB1JekRD327UwLYJ4uoExm5k4LdTSGQiGwxZki6");
-    // const pubkey = new PublicKey("GaSXoiQULHTanhP8EQmZR3ZwaDLzRs3xWxBMSLcX2kPT");
+    // const pubkey = new PublicKey("6fVAvhDPbKx8GYxRUjFUjaWhSKQj25ZkN5xEUK98NtYh");
     // const result = await retryGetDomainInfo(pubkey);
+    // console.log(result);
+    // const owner = new PublicKey("8f52Mczxf4H9pcoNvRBJwAFsKhTSGhHpeA2qgF2wpSJ1");
+    // const domainDetails = await retryGetDomainsWithWallet(owner);
+    // console.log(domainDetails);
+
+    // const results = await fetchNamenodesFromFileAndUpsert(
+    //     "/Users/fuzezhong/Documents/GitHub/zhongfuze/solana-name-watch/watcher3.name_accounts.txt"
+    // );
+    // console.log(results);
+
+    const owner = new PublicKey("8f52Mczxf4H9pcoNvRBJwAFsKhTSGhHpeA2qgF2wpSJ1");
+    const domainDetails = await retryGetDomainsWithWallet(owner);
+    console.log(domainDetails);
+
+    // const wallet = new PublicKey("6fVAvhDPbKx8GYxRUjFUjaWhSKQj25ZkN5xEUK98NtYh");
+    // const result = await retryGetPrimaryDomains([wallet]);
     // console.log(result);
 }
 

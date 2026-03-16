@@ -1,5 +1,6 @@
 import express from 'express';
 import { createRequire } from 'module';
+import { spawn } from 'node:child_process';
 import { Connection, clusterApiUrl, PublicKey } from '@solana/web3.js';
 import pgp from 'pg-promise';
 import dotenv from 'dotenv';
@@ -63,6 +64,11 @@ const rpcLimiter = new Bottleneck({
 const SOL_TLD = new PublicKey("58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx"); // .sol TLD
 const NAME_PROGRAM_ID = new PublicKey("namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX");
 const solanaZeroAddress = "11111111111111111111111111111111";
+const WATCHER_TX_OUTPUT_PATH = process.env.TX_OUTPUT_PATH ?? "./data/watcher3.transactions.jsonl";
+const WATCHER_STATE_PATH = process.env.STATE_PATH ?? "./data/watcher3.state.json";
+const WATCHER_NAME_ACCOUNTS_OUTPUT_DIR = process.env.NAME_ACCOUNTS_OUTPUT_DIR ?? "./data";
+const WATCHER_NAME_ACCOUNTS_FILE_PREFIX = process.env.NAME_ACCOUNTS_FILE_PREFIX ?? "watcher3.name_accounts";
+const HALF_HOUR_MS = Number.parseInt(process.env.HALF_HOUR_MS ?? "", 10) || 30 * 60 * 1000;
 
 // fetchAllDomains
 // dumps all the domains namenode
@@ -688,6 +694,61 @@ function chunkArray(items, chunkSize) {
     return chunks;
 }
 
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getNextHalfHourDelayMs() {
+    const now = Date.now();
+    const nextBoundary = Math.ceil(now / HALF_HOUR_MS) * HALF_HOUR_MS;
+    return Math.max(nextBoundary - now, 1000);
+}
+
+async function sleepWithStatus(ms) {
+    let remaining = ms;
+    while (remaining > 0) {
+        const step = Math.min(remaining, 60_000);
+        console.log(`hold on: sleeping ${Math.ceil(remaining / 1000)}s until next historical cycle`);
+        await sleep(step);
+        remaining -= step;
+    }
+}
+
+async function runWatcher3HistoricalFetch() {
+    await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ["src/watcher3.js"], {
+            cwd: process.cwd(),
+            stdio: "inherit",
+            env: {
+                ...process.env,
+                TX_OUTPUT_PATH: WATCHER_TX_OUTPUT_PATH,
+                STATE_PATH: WATCHER_STATE_PATH,
+                NAME_ACCOUNTS_OUTPUT_DIR: WATCHER_NAME_ACCOUNTS_OUTPUT_DIR,
+                NAME_ACCOUNTS_FILE_PREFIX: WATCHER_NAME_ACCOUNTS_FILE_PREFIX,
+            },
+        });
+
+        child.on("error", reject);
+        child.on("exit", (code) => {
+            if (code === 0) {
+                resolve();
+                return;
+            }
+            reject(new Error(`watcher3 exited with code ${code}`));
+        });
+    });
+}
+
+async function getLatestWatcherNameAccountsFile() {
+    if (!fs.existsSync(WATCHER_STATE_PATH)) {
+        return null;
+    }
+
+    const raw = await fs.promises.readFile(WATCHER_STATE_PATH, "utf8");
+    const state = JSON.parse(raw);
+    return state?.exports?.nameAccounts?.latestFilePath ?? null;
+}
+
 const getPrimaryDomains = async (wallets) => {
     try {
         const primaryDomains = await rpcLimiter.schedule(() =>
@@ -808,6 +869,8 @@ const getTextsV2 = async (domainName) => {
 };
 
 async function fetchNamenodesFromFileAndUpsert(filePath) {
+    const upsertFilePath = filePath.replace('.name_accounts.', '.name_accounts.upsert.');
+    const doneFilePath = filePath.replace('.name_accounts.', '.name_accounts.done.');
     const content = await fs.promises.readFile(filePath, 'utf8');
     const nameAccountEntryMap = new Map();
     for (const line of content.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
@@ -918,11 +981,28 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
     const existingRowMap = new Map(existingRows.map((row) => [row.namenode, row]));
 
     const allCandidateOwners = new Set();
+    const ownersNeedingDomainDetails = new Set();
     for (const [, candidate] of candidateNamenodeMap.entries()) {
         const { seedDomainInfo } = candidate;
         if (seedDomainInfo.owner && seedDomainInfo.owner !== solanaZeroAddress) {
             allCandidateOwners.add(seedDomainInfo.owner);
         }
+
+        const existingRow = existingRowMap.get(seedDomainInfo.namenode) ?? null;
+        const missingName = !existingRow?.name;
+        const missingLabelName = !existingRow?.label_name;
+        if ((missingName || missingLabelName) && seedDomainInfo.owner && seedDomainInfo.owner !== solanaZeroAddress) {
+            ownersNeedingDomainDetails.add(seedDomainInfo.owner);
+        }
+    }
+
+    console.log(`Owners needing domainDetails backfill: ${ownersNeedingDomainDetails.size}`);
+    console.log([...ownersNeedingDomainDetails]);
+
+    const ownerDomainDetailsMap = new Map();
+    for (const owner of ownersNeedingDomainDetails) {
+        const domainDetails = await retryGetDomainsWithWallet(owner);
+        ownerDomainDetailsMap.set(owner, domainDetails);
     }
 
     const primaryOwnerWallets = [...allCandidateOwners].map((owner) => new PublicKey(owner));
@@ -941,14 +1021,17 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
     }
 
     const results = [];
+    const mergedRowLines = [];
     for (const [namenode, candidate] of candidateNamenodeMap.entries()) {
         const { seedDomainInfo } = candidate;
         console.log(`Processing candidate namenode ${namenode}`);
         const primaryDomains = primaryDomainsByOwner.get(seedDomainInfo.owner) ?? [];
         const primaryMatch = primaryDomains.find((item) => item.namenode === namenode);
         const existingRow = existingRowMap.get(namenode) ?? null;
-        const resolvedName = existingRow?.name ?? primaryMatch?.name ?? null;
-        const resolvedLabelName = existingRow?.label_name ?? primaryMatch?.label_name ?? null;
+        const ownerDomainDetails = ownerDomainDetailsMap.get(seedDomainInfo.owner) ?? [];
+        const matchedDomainDetail = ownerDomainDetails.find((item) => item.namenode === namenode) ?? null;
+        const resolvedName = existingRow?.name ?? matchedDomainDetail?.name ?? primaryMatch?.name ?? null;
+        const resolvedLabelName = existingRow?.label_name ?? matchedDomainDetail?.label_name ?? primaryMatch?.label_name ?? null;
         const domainName = resolvedLabelName || (resolvedName?.endsWith('.sol') ? resolvedName.slice(0, -4) : resolvedName);
         const domainTexts = domainName ? await retryGetTextsV2(domainName) : {};
         const formattedNow = dayjs().format('YYYY-MM-DD HH:mm:ss');
@@ -998,41 +1081,36 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
             name_account: namenode,
             upserted_count: 1,
         });
+        mergedRowLines.push(JSON.stringify(mergedRow));
         console.log(`Upserted namenode ${mergedRow.namenode} (${mergedRow.name ?? 'unknown'})`);
     }
+
+    await fs.promises.writeFile(upsertFilePath, `${mergedRowLines.join('\n')}\n`, 'utf8');
+    console.log(`Wrote upsert results to ${upsertFilePath}`);
+
+    await fs.promises.rename(filePath, doneFilePath);
+    console.log(`Renamed input file to ${doneFilePath}`);
 
     return results;
 }
 
 
 const run = async () => {
-    // await fetchAllDomains();
-    // await readDomainsAndUpsert();
-    // await fetchDomainsAndUpsert();
-    // await fetchDomainsByOwnersAndUpsert();
-    // await fetchPrimaryDomainsAndUpdate();
-    // await fetchDomainTextsV2AndUpdate();
-    // await fetch_namenode_and_upsert("6fVAvhDPbKx8GYxRUjFUjaWhSKQj25ZkN5xEUK98NtYh");
-    // const pubkey = new PublicKey("6o79HpB1JekRD327UwLYJ4uoExm5k4LdTSGQiGwxZki6");
-    // const pubkey = new PublicKey("6fVAvhDPbKx8GYxRUjFUjaWhSKQj25ZkN5xEUK98NtYh");
-    // const result = await retryGetDomainInfo(pubkey);
-    // console.log(result);
-    // const owner = new PublicKey("8f52Mczxf4H9pcoNvRBJwAFsKhTSGhHpeA2qgF2wpSJ1");
-    // const domainDetails = await retryGetDomainsWithWallet(owner);
-    // console.log(domainDetails);
+    while (true) {
+        console.log("starting historical watcher cycle");
+        await runWatcher3HistoricalFetch();
 
-    // const results = await fetchNamenodesFromFileAndUpsert(
-    //     "/Users/fuzezhong/Documents/GitHub/zhongfuze/solana-name-watch/watcher3.name_accounts.txt"
-    // );
-    // console.log(results);
+        const latestNameAccountsFile = await getLatestWatcherNameAccountsFile();
+        if (latestNameAccountsFile && fs.existsSync(latestNameAccountsFile)) {
+            console.log(`processing historical batch ${latestNameAccountsFile}`);
+            const results = await fetchNamenodesFromFileAndUpsert(latestNameAccountsFile);
+            console.log(results);
+        } else {
+            console.log("no watcher3 name_accounts batch found after historical fetch");
+        }
 
-    const owner = new PublicKey("8f52Mczxf4H9pcoNvRBJwAFsKhTSGhHpeA2qgF2wpSJ1");
-    const domainDetails = await retryGetDomainsWithWallet(owner);
-    console.log(domainDetails);
-
-    // const wallet = new PublicKey("6fVAvhDPbKx8GYxRUjFUjaWhSKQj25ZkN5xEUK98NtYh");
-    // const result = await retryGetPrimaryDomains([wallet]);
-    // console.log(result);
+        await sleepWithStatus(getNextHalfHourDelayMs());
+    }
 }
 
 // Execute the run function

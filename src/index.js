@@ -45,21 +45,21 @@ const db = pg({
 const SOLANA_MAIN_CLIENT = new Connection(process.env.ALCHEMY_RPC);
 
 
-const rpcLimiter = new Bottleneck({
-    minTime: 0, // means Bottleneck will not add any fixed delay between jobs
-    maxConcurrent: 20, // means at most 20 jobs can run at the same time.
-    reservoir: 50, // means you start with 50 available executions
-    reservoirRefreshAmount: 50, // mean the bucket refills to 50 every 1 second
-    reservoirRefreshInterval: 1000 // ...every 1 second
-});
-
 // const rpcLimiter = new Bottleneck({
-//     minTime: 100, // 10 requests per second
-//     maxConcurrent: 1, // keep only one Solana RPC request in flight
-//     reservoir: 10, // allow up to 10 requests each second
-//     reservoirRefreshAmount: 10, // refill to 10 requests
-//     reservoirRefreshInterval: 1000 // every 1 second
+//     minTime: 0, // means Bottleneck will not add any fixed delay between jobs
+//     maxConcurrent: 20, // means at most 20 jobs can run at the same time.
+//     reservoir: 50, // means you start with 50 available executions
+//     reservoirRefreshAmount: 50, // mean the bucket refills to 50 every 1 second
+//     reservoirRefreshInterval: 1000 // ...every 1 second
 // });
+
+const rpcLimiter = new Bottleneck({
+    minTime: 100, // 10 requests per second
+    maxConcurrent: 1, // keep only one Solana RPC request in flight
+    reservoir: 10, // allow up to 10 requests each second
+    reservoirRefreshAmount: 10, // refill to 10 requests
+    reservoirRefreshInterval: 1000 // every 1 second
+});
 
 const SOL_TLD = new PublicKey("58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx"); // .sol TLD
 const NAME_PROGRAM_ID = new PublicKey("namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX");
@@ -1096,6 +1096,13 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
 
 
 const run = async () => {
+    // lewsales.sol
+    // const pubkey = new PublicKey("5Y14KVppmhGa1yVjrDDG5iGsb6RwZbxJ9xuaUUAEV4gT");
+    // const result = await retryGetDomainInfo(pubkey);
+    // console.log(result);
+
+    // const results = await fetchNamenodesFromFileAndUpsert("/Users/fuzezhong/Documents/GitHub/zhongfuze/solana-name-indexer/data/watcher3.name_accounts.test.txt");
+    // console.log(results);
     while (true) {
         console.log("starting historical watcher cycle");
         await runWatcher3HistoricalFetch();

@@ -13,20 +13,22 @@
     "license": "ISC",
     "description": "",
     "dependencies": {
-        "@bonfida/spl-name-service": "^3.0.19",
+        "@bonfida/spl-name-service": "^4.0.1",
         "@onsol/tldparser": "^1.0.8",
         "@solana/spl-token": "0.4.14",
+        "@solana/web3.js": "^1.99.0",
         "bottleneck": "2.19.5",
+        "bs58": "^6.0.0",
         "dayjs": "1.11.13",
+        "dotenv": "^16.4.7",
         "express": "4.22.1",
         "pg": "8.13.0",
         "pg-promise": "11.10.1",
-        "bs58": "^6.0.0",
-        "dotenv": "^16.4.7",
         "pino": "^9.6.0",
         "ws": "^8.18.0"
     },
     "overrides": {
+        "qs": "6.16.0",
         "@solana/spl-token": "0.4.14",
         "@bonfida/spl-name-service": {
             "@solana/spl-token": "0.4.14"

@@ -12,17 +12,19 @@ import { log } from 'console';
 
 const require = createRequire(import.meta.url);
 const {
-    getAllSnsDomains,
-    getSnsDomainsForOwner,
-    getSnsNftsForOwner,
+    getAllDomains,
+    getDomainKeysWithReverses,
+    getAllRegisteredDomains,
     NameRegistryState,
+    getRecordV2Key,
     Record,
-    getMultipleRecords,
-    getSnsDomainKeySync,
+    getRecords,
+    getRecordV2,
+    getDomainKeySync,
     getPrimaryDomain,
     reverseLookup,
     getMultiplePrimaryDomains,
-    SNS_ROOT_DOMAIN_ACCOUNT,
+    ROOT_DOMAIN_ACCOUNT,
     getHandleAndRegistryKey,
     getTwitterRegistry,
 } = require('@bonfida/spl-name-service');
@@ -42,34 +44,6 @@ const db = pg({
 
 const SOLANA_MAIN_CLIENT = new Connection(process.env.ALCHEMY_RPC);
 
-const SNS_SUFFIX = ".sns";
-const LEGACY_SOL_SUFFIX = ".sol";
-
-function stripSnsSuffix(domainName) {
-    if (domainName?.endsWith(SNS_SUFFIX) || domainName?.endsWith(LEGACY_SOL_SUFFIX)) {
-        return domainName.slice(0, -SNS_SUFFIX.length);
-    }
-    return domainName;
-}
-
-function toSnsDomainName(domainName) {
-    if (!domainName) {
-        return null;
-    }
-    return `${stripSnsSuffix(domainName)}${SNS_SUFFIX}`;
-}
-
-function getCandidateOwnerAddresses(seedDomainInfo) {
-    return [
-        seedDomainInfo.owner,
-        seedDomainInfo.nft_owner,
-    ].filter((owner, index, owners) =>
-        owner &&
-        owner !== solanaZeroAddress &&
-        owners.indexOf(owner) === index
-    );
-}
-
 
 // const rpcLimiter = new Bottleneck({
 //     minTime: 0, // means Bottleneck will not add any fixed delay between jobs
@@ -87,6 +61,8 @@ const rpcLimiter = new Bottleneck({
     reservoirRefreshInterval: 1000 // every 1 second
 });
 
+//  namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX
+const SOL_TLD = new PublicKey("58PwtjSDuFHuUkYjH9BYnnQKHfwo9reZhC2zMJv9JPkx");
 const NAME_PROGRAM_ID = new PublicKey("namesLPneVptA9Z5rqUDD9tMTWEJwofgaYwp8cawRkX");
 const solanaZeroAddress = "11111111111111111111111111111111";
 const WATCHER_TX_OUTPUT_PATH = process.env.TX_OUTPUT_PATH ?? "./data/watcher3.transactions.jsonl";
@@ -97,13 +73,14 @@ const HALF_HOUR_MS = Number.parseInt(process.env.HALF_HOUR_MS ?? "", 10) || 30 *
 
 // fetchAllDomains
 // dumps all the domains namenode
-// Fetch all registered .sns domains
+// Fetch all registered .sol domains
 const fetchAllDomains = async () => {
     try {
-        console.log("Fetching all registered .sns domains...");
+        console.log("Fetching all registered .sol domains...");
         // const connection = new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
         const connection = new Connection(process.env.ALCHEMY_RPC, 'confirmed')
-        const registeredDomains = await getAllSnsDomains(connection);
+        const registeredDomains = await getAllRegisteredDomains(connection);
+        // const registeredDomains = await getAllRegisteredDomainsNew(connection)
         console.log("Total domains fetched:", registeredDomains.length);
         console.log(registeredDomains[0])
         const domainsList = registeredDomains.map(domain => domain.pubkey);
@@ -208,7 +185,7 @@ async function fetchDomainsAndUpsert() {
             if (batch.length > 0) {
                 for (const row of batch) {
                     // Call getDomainInfo and fetch domain details
-                    // const { pubkey } = getSnsDomainKeySync("v2ex");
+                    // const { pubkey } = getDomainKeySync("v2ex");
                     const pubkey = new PublicKey(row.namenode);
                     const domainInfo = await retryGetDomainInfo(pubkey);
                     if (domainInfo) {
@@ -468,7 +445,7 @@ async function fetchDomainTextsV2AndUpdate() {
             if (batch.length > 0) {
                 for (const row of batch) {
                     const name = row.name;
-                    const domainName = stripSnsSuffix(name);
+                    const domainName = name.endsWith('.sns') ? name.slice(0, -4) : name;
                     const domain_texts = await retryGetTextsV2(domainName);
                     if (Object.keys(domain_texts).length > 0) {
                         hasTextsCount += 1;
@@ -525,7 +502,7 @@ async function retryGetDomainInfo(domain_pubkey, retries = 3) {
         namenode: domain_pubkey,
         nft_owner: null,
         is_tokenized: false,
-        parent_node: SNS_ROOT_DOMAIN_ACCOUNT.toBase58(), // Default parent_node
+        parent_node: SOL_TLD.toBase58(), // Default parent_node
         expire_time: null,
         owner: solanaZeroAddress, // Solana zero address
         resolver: null,
@@ -664,31 +641,20 @@ const getDomainsWithWallet = async (wallet) => {
     try {
         const walletPubkey = new PublicKey(wallet);
         const domainsWithReverses = await rpcLimiter.schedule(() =>
-            getSnsDomainsForOwner(SOLANA_MAIN_CLIENT, walletPubkey)
-        );
-        const tokenizedDomains = await rpcLimiter.schedule(() =>
-            getSnsNftsForOwner(SOLANA_MAIN_CLIENT, walletPubkey)
+            getDomainKeysWithReverses(SOLANA_MAIN_CLIENT, walletPubkey)
         );
         let domains = [];
-        const domainMap = new Map(
-            [...domainsWithReverses, ...tokenizedDomains].map((domain) => [
-                domain.key.toBase58(),
-                domain,
-            ])
-        );
 
-        domainMap.forEach((domain) => {
-            // console.log(`Domain: ${domain.domain}, Public Key: ${domain.key}`);
+        domainsWithReverses.forEach((domain) => {
+            // console.log(`Domain: ${domain.domain}, Public Key: ${domain.pubKey}`);
 
             const formattedNow = dayjs().format('YYYY-MM-DD HH:mm:ss');
-            const snsName = toSnsDomainName(domain.domain);
-            const labelName = stripSnsSuffix(snsName);
 
             domains.push({
-                namenode: domain.key.toBase58(),
-                name: snsName,
-                label_name: labelName,
-                parent_node: SNS_ROOT_DOMAIN_ACCOUNT.toBase58(),
+                namenode: domain.pubKey.toBase58(),
+                name: domain.domain + ".sns",
+                label_name: domain.domain,
+                parent_node: SOL_TLD.toBase58(), // Ensure SOL_TLD is defined
                 expire_time: "2116-09-24 09:30:00", // Placeholder expire time
                 owner: walletPubkey.toBase58(),
                 resolver: NAME_PROGRAM_ID.toBase58(), // Ensure NAME_PROGRAM_ID is defined
@@ -793,14 +759,12 @@ const getPrimaryDomains = async (wallets) => {
         const formattedNow = dayjs().format('YYYY-MM-DD HH:mm:ss');
         primaryDomains.forEach((primary_name, index) => {
             if (primary_name !== undefined && typeof primary_name === 'string') {
-                const labelName = stripSnsSuffix(primary_name);
-                const snsName = toSnsDomainName(primary_name);
-                const { pubkey: primary_name_pubkey } = getSnsDomainKeySync(labelName);
+                const { pubkey: primary_name_pubkey } = getDomainKeySync(primary_name);
                 result.push({
                     reverse_address: wallets[index].toBase58(),
                     is_primary: true,
-                    name: snsName,
-                    label_name: labelName,
+                    name: primary_name + ".sns",
+                    label_name: primary_name,
                     namenode: primary_name_pubkey.toBase58(),
                     update_time: formattedNow,
                 });
@@ -878,29 +842,29 @@ const getTextsV2 = async (domainName) => {
 
     try {
         const texts = {}; // json object
-        const snsDomainName = toSnsDomainName(domainName);
-        const records = await rpcLimiter.schedule(() =>
-            getMultipleRecords(SOLANA_MAIN_CLIENT, snsDomainName, record_keys, { deserialize: true })
-        );
-
-        records.forEach((retrievedRecord, index) => {
-            const record = record_keys[index];
-            const value = retrievedRecord?.deserializedContent;
-            if (value) {
-                // const value = retrievedRecord.getContent().toString();
-                texts[record.toLowerCase()] = value;
-                // if (isValidUTF8(value)) {
-                //     texts[record.toLowerCase()] = value;
-                // } else {
-                //     console.warn(`Invalid UTF-8 detected in record ${record} for domain ${domainName}. Skipping.`);
-                // }
+        for (const record of record_keys) {
+            try {
+                const { deserializedContent } = await rpcLimiter.schedule(() =>
+                    getRecordV2(SOLANA_MAIN_CLIENT, domainName, record, { deserialize: true })
+                );
+                if (deserializedContent) {
+                    // const value = retrievedRecord.getContent().toString();
+                    texts[record.toLowerCase()] = deserializedContent;
+                    // if (isValidUTF8(value)) {
+                    //     texts[record.toLowerCase()] = value;
+                    // } else {
+                    //     console.warn(`Invalid UTF-8 detected in record ${record} for domain ${domainName}. Skipping.`);
+                    // }
+                }
+            } catch (error) {
+                // console.error(`Error retrieving record ${record} for domain ${domainName}:`, error);
+                continue;
             }
-        });
-
-        console.log(`domain ${snsDomainName} getMultipleRecords texts:`, texts);
+        }
+        console.log(`domain ${domainName} getRecordV2 texts:`, texts);
         return texts;
     } catch (error) {
-        console.error(`Error fetching texts getMultipleRecords error:`, error);
+        console.error(`Error fetching texts getRecordV2 error:`, error);
         throw error
     }
 };
@@ -947,7 +911,7 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
             continue;
         }
 
-        if (seedDomainInfo.parent_node !== SNS_ROOT_DOMAIN_ACCOUNT.toBase58()) {
+        if (seedDomainInfo.parent_node !== SOL_TLD.toBase58()) {
             continue;
         }
 
@@ -1021,18 +985,15 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
     const ownersNeedingDomainDetails = new Set();
     for (const [, candidate] of candidateNamenodeMap.entries()) {
         const { seedDomainInfo } = candidate;
-        const candidateOwners = getCandidateOwnerAddresses(seedDomainInfo);
-        for (const owner of candidateOwners) {
-            allCandidateOwners.add(owner);
+        if (seedDomainInfo.owner && seedDomainInfo.owner !== solanaZeroAddress) {
+            allCandidateOwners.add(seedDomainInfo.owner);
         }
 
         const existingRow = existingRowMap.get(seedDomainInfo.namenode) ?? null;
         const missingName = !existingRow?.name;
         const missingLabelName = !existingRow?.label_name;
-        if (missingName || missingLabelName) {
-            for (const owner of candidateOwners) {
-                ownersNeedingDomainDetails.add(owner);
-            }
+        if ((missingName || missingLabelName) && seedDomainInfo.owner && seedDomainInfo.owner !== solanaZeroAddress) {
+            ownersNeedingDomainDetails.add(seedDomainInfo.owner);
         }
     }
 
@@ -1065,23 +1026,21 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
     for (const [namenode, candidate] of candidateNamenodeMap.entries()) {
         const { seedDomainInfo } = candidate;
         console.log(`Processing candidate namenode ${namenode}`);
-        const candidateOwners = getCandidateOwnerAddresses(seedDomainInfo);
-        const primaryDomains = candidateOwners.flatMap((owner) => primaryDomainsByOwner.get(owner) ?? []);
+        const primaryDomains = primaryDomainsByOwner.get(seedDomainInfo.owner) ?? [];
         const primaryMatch = primaryDomains.find((item) => item.namenode === namenode);
         const existingRow = existingRowMap.get(namenode) ?? null;
-        const ownerDomainDetails = candidateOwners.flatMap((owner) => ownerDomainDetailsMap.get(owner) ?? []);
+        const ownerDomainDetails = ownerDomainDetailsMap.get(seedDomainInfo.owner) ?? [];
         const matchedDomainDetail = ownerDomainDetails.find((item) => item.namenode === namenode) ?? null;
-        const resolvedNameSource = existingRow?.name ?? matchedDomainDetail?.name ?? primaryMatch?.name ?? null;
-        const resolvedLabelName = existingRow?.label_name ?? matchedDomainDetail?.label_name ?? primaryMatch?.label_name ?? stripSnsSuffix(resolvedNameSource);
-        const resolvedName = resolvedNameSource ? toSnsDomainName(resolvedNameSource) : toSnsDomainName(resolvedLabelName);
-        const domainName = resolvedLabelName || stripSnsSuffix(resolvedName);
+        const resolvedName = existingRow?.name ?? matchedDomainDetail?.name ?? primaryMatch?.name ?? null;
+        const resolvedLabelName = existingRow?.label_name ?? matchedDomainDetail?.label_name ?? primaryMatch?.label_name ?? null;
+        const domainName = resolvedLabelName || (resolvedName?.endsWith('.sns') ? resolvedName.slice(0, -4) : resolvedName);
         const domainTexts = domainName ? await retryGetTextsV2(domainName) : {};
         const formattedNow = dayjs().format('YYYY-MM-DD HH:mm:ss');
         const mergedRow = {
             namenode: seedDomainInfo.namenode,
             name: resolvedName,
             label_name: resolvedLabelName,
-            parent_node: seedDomainInfo.parent_node ?? SNS_ROOT_DOMAIN_ACCOUNT.toBase58(),
+            parent_node: seedDomainInfo.parent_node ?? SOL_TLD.toBase58(),
             registration_time: seedDomainInfo.registration_time ?? null,
             registration_hash: seedDomainInfo.registration_hash ?? null,
             registration_height: seedDomainInfo.registration_height ?? null,
@@ -1138,15 +1097,13 @@ async function fetchNamenodesFromFileAndUpsert(filePath) {
 
 
 const run = async () => {
-    // // lewsales.sns
-    // const { pubkey } = getSnsDomainKeySync("lewsales");
-    // // const pubkey = new PublicKey("5Y14KVppmhGa1yVjrDDG5iGsb6RwZbxJ9xuaUUAEV4gT");
+    // lewsales.sol
+    // const pubkey = new PublicKey("5Y14KVppmhGa1yVjrDDG5iGsb6RwZbxJ9xuaUUAEV4gT");
     // const result = await retryGetDomainInfo(pubkey);
     // console.log(result);
 
     // const results = await fetchNamenodesFromFileAndUpsert("/Users/fuzezhong/Documents/GitHub/zhongfuze/solana-name-indexer/data/watcher3.name_accounts.test.txt");
     // console.log(results);
-
     while (true) {
         console.log("starting historical watcher cycle");
         await runWatcher3HistoricalFetch();
